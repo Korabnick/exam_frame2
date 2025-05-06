@@ -1,0 +1,17 @@
+flask==3.1.0
+flask-sqlalchemy==3.1.1
+flask-migrate==4.1.0
+psycopg2-binary==2.9.10
+python-dotenv==1.1.0
+gunicorn==23.0.0
+flask-cors==5.0.1
+marshmallow==4.0.0
+apispec==6.8.1
+apispec-webframeworks==1.2.0
+pytest==8.3.5
+pytest-cov==6.1.1
+flake8==7.2.0
+flask-swagger-ui==4.11.1
+sqlalchemy_schemadisplay==2.0
+flask-BasicAuth==0.2.0
+flask-admin==1.6.1

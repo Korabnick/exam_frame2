@@ -1,0 +1,860 @@
+.env:
+```
+# Database
+DB_USER=exam
+DB_PASSWORD=exam_password
+DB_NAME=exam_db
+DB_URI=postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
+
+# Flask
+SECRET_KEY=cake_is_a_lie
+FLASK_ENV=development
+JWT_SECRET_KEY=salty_dog
+
+# Admin
+FLASK_ADMIN_USER=admin
+FLASK_ADMIN_PASSWORD=Sirius2025
+
+# Redis
+REDIS_URL=redis://redis:6379/0
+
+# Logging
+LOG_LEVEL=INFO
+```
+
+create_test_db.py:
+```
+import psycopg2
+from app.config import Config
+
+def create_test_db():
+    conn = None
+    try:
+        conn = psycopg2.connect(
+            dbname="exam_db",
+            user="exam",
+            password="exam_password"
+        )
+        conn.autocommit = True
+        cursor = conn.cursor()
+        
+        cursor.execute("DROP DATABASE IF EXISTS exam_db_test")
+        
+        cursor.execute("CREATE DATABASE exam_db_test WITH OWNER exam ENCODING 'UTF8'")
+        print("Тестовая БД exam_db_test успешно создана")
+        
+    except Exception as e:
+        print(f"Ошибка при создании тестовой БД: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+if __name__ == "__main__":
+    create_test_db()
+```
+
+docker-compose.yml:
+```
+version: '3.8'
+
+services:
+  nginx:
+    build: ./nginx
+    ports:
+      - "80:80"
+    depends_on:
+      - web
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/static/favicon.ico"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  db:
+    image: postgres:17.4-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  web:
+    build: .
+    command: gunicorn --bind 0.0.0.0:5000 --workers 4 --access-logfile - --error-logfile - app.wsgi:app
+    volumes:
+      - .:/app
+    environment:
+      - FLASK_ENV=production
+    depends_on:
+      - db
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4.3-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+```
+
+Dockerfile:
+```
+FROM python:3.12-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libpq-dev \
+    postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . .
+
+RUN chmod +x /app/entrypoint.sh
+ENTRYPOINT ["/app/entrypoint.sh"]
+```
+
+entrypoint.sh:
+```
+#!/bin/sh
+
+until pg_isready -h db -p 5432 -U exam -d exam_db; do
+  echo "Waiting for PostgreSQL to be ready..."
+  sleep 2
+done
+
+flask db upgrade
+
+exec gunicorn --bind 0.0.0.0:5000 --workers 4 --access-logfile - --error-logfile - app.wsgi:app
+```
+
+init_db.py:
+```
+from app import create_app
+from app.models import db, Role, User
+from app.config import Config
+
+app = create_app()
+
+with app.app_context():
+    db.create_all()
+    
+    roles = [
+        ('admin', 'Administrator with full access'),
+        ('user', 'Regular user with read-only access')
+    ]
+    
+    for name, description in roles:
+        if not Role.query.filter_by(name=name).first():
+            db.session.add(Role(name=name, description=description))
+    
+    db.session.commit()
+    
+    admin_role = Role.query.filter_by(name='admin').first()
+    if not User.query.filter_by(username=Config.FLASK_ADMIN_USER).first():
+        admin = User(
+            username=Config.FLASK_ADMIN_USER,
+            email='admin@example.com',
+            role_id=admin_role.id
+        )
+        admin.set_password(Config.FLASK_ADMIN_PASSWORD)
+        db.session.add(admin)
+        db.session.commit()
+```
+
+Makefile:
+```
+.PHONY: install test lint run migrate upgrade downgrade clean
+
+install:
+	pip install -r requirements.txt
+
+test:
+	pytest -v --cov=app --cov-report=term-missing tests/
+
+test-unit:
+	pytest -v --cov=app --cov-report=term-missing tests/unit/
+
+test-integration:
+	pytest -v --cov=app --cov-report=term-missing tests/integration/
+
+test-html:
+	pytest --cov=app --cov-report=html
+	start htmlcov/index.html
+
+lint:
+	flake8 app/
+
+run:
+	flask run
+
+migrate:
+	flask db migrate -m "Migration message"
+
+upgrade:
+	flask db upgrade
+
+downgrade:
+	flask db downgrade
+
+clean:
+	find . -type d -name '__pycache__' -exec rm -rf {} +
+	find . -type d -name '.pytest_cache' -exec rm -rf {} +
+	rm -f .coverage
+
+erd:
+	python scripts/generate_er_diagram.py
+```
+
+requirements.txt:
+```
+flask==3.1.0
+flask-sqlalchemy==3.1.1
+flask-migrate==4.1.0
+flask-jwt-extended==4.7.1
+psycopg2-binary==2.9.10
+python-dotenv==1.1.0
+gunicorn==23.0.0
+flask-cors==5.0.1
+marshmallow==4.0.0
+apispec==6.8.1
+apispec-webframeworks==1.2.0
+pytest==8.3.5
+pytest-cov==6.1.1
+flake8==7.2.0
+redis==6.0.0
+flask-redis==0.4.0
+flask-login==0.6.3
+flask-swagger-ui==4.11.1
+sqlalchemy_schemadisplay==2.0
+```
+
+scripts/generate_er_diagram.py:
+```
+import os
+from sqlalchemy_schemadisplay import create_schema_graph
+from sqlalchemy import create_engine, MetaData
+from dotenv import load_dotenv
+
+load_dotenv()
+
+DB_USER = os.getenv('DB_USER', 'exam')
+DB_PASSWORD = os.getenv('DB_PASSWORD', 'exam_password')
+DB_NAME = os.getenv('DB_NAME', 'exam_db')
+DB_HOST = os.getenv('DB_HOST', 'localhost')
+
+DB_URI = f'postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:5432/{DB_NAME}'
+
+def generate_er_diagram():
+    try:
+        engine = create_engine(DB_URI)
+        metadata = MetaData()
+        
+        metadata.reflect(bind=engine)
+        
+        graph = create_schema_graph(
+            engine=engine,
+            metadata=metadata,
+            show_datatypes=False,
+            show_indexes=False,
+            rankdir='TB',
+            concentrate=False
+        )
+        
+        graph.write_png('docs/er_diagram.png')
+        graph.write_svg('docs/er_diagram.svg')
+        print("ER диаграмма успешно создана: er_diagram.png и er_diagram.svg")
+        
+    except Exception as e:
+        print(f"Ошибка при создании ER диаграммы: {e}")
+
+if __name__ == "__main__":
+    generate_er_diagram()
+```
+
+nginx/Dockerfile:
+```
+FROM nginx:1.27.5-alpine
+
+RUN rm /etc/nginx/conf.d/default.conf
+COPY nginx.conf /etc/nginx/nginx.conf
+
+RUN apk add --no-cache apache2-utils
+RUN htpasswd -b -c /etc/nginx/.htpasswd admin Sirius2025
+
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]  
+```
+
+nginx/nginx.conf:
+```
+worker_processes 1;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include mime.types;
+    default_type application/octet-stream;
+    sendfile on;
+    keepalive_timeout 65;
+
+    upstream app_server {
+        server web:5000;
+    }
+
+    server {
+        listen 80;
+        server_name localhost;
+
+        location / {
+            proxy_pass http://app_server;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        location /static/ {
+            alias /app/app/static/;
+            expires 30d;
+        }
+
+        location /admin/ {
+            proxy_pass http://app_server;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            auth_basic "Admin Area";
+            auth_basic_user_file /etc/nginx/.htpasswd;
+        }
+    }
+}
+```
+
+docs/api.yaml:
+```
+openapi: 3.0.0
+info:
+  title: Exam API
+  version: 1.0.0
+  description: API for exam system with JWT authentication
+
+servers:
+  - url: http://localhost/api
+    description: Development server
+
+paths:
+  /login:
+    post:
+      tags: [Auth]
+      summary: User login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserLogin'
+      responses:
+        '200':
+          description: Successful login
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+        '400':
+          description: Validation error
+        '401':
+          description: Invalid credentials
+
+  /users:
+    get:
+      tags: [Users]
+      summary: Get all users
+      security:
+        - JWT: []
+      responses:
+        '200':
+          description: List of users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User'
+        '401':
+          description: Unauthorized
+
+    post:
+      tags: [Users]
+      summary: Create new user (admin only)
+      security:
+        - JWT: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserCreate'
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: Validation error
+        '403':
+          description: Forbidden (admin only)
+
+components:
+  schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+
+    UserCreate:
+      type: object
+      required:
+        - username
+        - email
+        - password
+      properties:
+        username:
+          type: string
+          minLength: 3
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+
+    UserLogin:
+      type: object
+      required:
+        - username
+        - password
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+
+  securitySchemes:
+    JWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+```
+
+app/__init__.py:
+```
+from flask import Flask
+from .extensions import db, migrate, jwt, swagger_ui
+from .logger import configure_logging
+from .config import Config
+
+def create_app(config_class=Config):
+    app = Flask(__name__)
+    app.config.from_object(config_class)
+    
+    db.init_app(app)
+    migrate.init_app(app, db)
+    jwt.init_app(app)
+    
+    configure_logging(app)
+    
+    from app.views.api import api_bp
+    from app.views.admin import admin_bp
+    
+    app.register_blueprint(api_bp, url_prefix='/api')
+    app.register_blueprint(admin_bp, url_prefix='/admin')
+
+    app.register_blueprint(swagger_ui, url_prefix='/api/docs')
+    
+    @app.route('/api/spec')
+    def api_spec():
+        with open('docs/api.yaml') as f:
+            return f.read()
+    
+    with app.app_context():
+        db.create_all()
+        try:
+            from app.services.auth import create_admin_user
+            create_admin_user()
+        except Exception as e:
+            app.logger.warning(f"Could not create admin user: {str(e)}")
+    
+    return app
+```
+
+app/config.py:
+```
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class Config:
+    FLASK_ENV = os.getenv('FLASK_ENV', 'development')
+    SECRET_KEY = os.getenv('SECRET_KEY', 'super-secret-key')
+    SQLALCHEMY_DATABASE_URI = os.getenv('DB_URI', 'postgresql://user:password@db:5432/app_db') + '?client_encoding=utf8'
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY', 'jwt-secret-key')
+    REDIS_URL = os.getenv('REDIS_URL', 'redis://redis:6379/0')
+    FLASK_ADMIN_USER = os.getenv('FLASK_ADMIN_USER', 'admin')
+    FLASK_ADMIN_PASSWORD = os.getenv('FLASK_ADMIN_PASSWORD', 'Sirius2025')
+    LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+
+class TestConfig(Config):
+    TESTING = True
+    SQLALCHEMY_DATABASE_URI = 'postgresql://exam:exam_password@localhost:5432/exam_db_test'
+    JWT_SECRET_KEY = 'test-secret-key'
+    REDIS_URL = 'redis://localhost:6379/1'
+```
+
+app/extensions.py:
+```
+from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
+from flask_jwt_extended import JWTManager
+from flask_redis import FlaskRedis
+from flask_swagger_ui import get_swaggerui_blueprint
+
+db = SQLAlchemy()
+migrate = Migrate()
+jwt = JWTManager()
+redis_client = FlaskRedis()
+
+swagger_ui = get_swaggerui_blueprint(
+    '/api/docs',
+    '/api/spec',
+    config={'app_name': "Exam API"}
+)
+```
+
+app/logger.py:
+```
+import logging
+import json
+from logging.config import dictConfig
+from flask import request
+
+def configure_logging(app):
+    dictConfig({
+        'version': 1,
+        'formatters': {
+            'default': {
+                'format': '[%(asctime)s] %(levelname)s in %(module)s: %(message)s',
+            },
+            'json': {
+                '()': 'app.logger.JsonFormatter',
+            }
+        },
+        'handlers': {
+            'console': {
+                'class': 'logging.StreamHandler',
+                'stream': 'ext://sys.stdout',
+                'formatter': 'default'
+            },
+            'json': {
+                'class': 'logging.StreamHandler',
+                'stream': 'ext://sys.stdout',
+                'formatter': 'json'
+            }
+        },
+        'root': {
+            'level': app.config['LOG_LEVEL'],
+            'handlers': ['console'] if app.config['FLASK_ENV'] == 'development' else ['json']
+        }
+    })
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        log_record = {
+            'timestamp': self.formatTime(record),
+            'level': record.levelname,
+            'message': record.getMessage(),
+            'module': record.module,
+            'function': record.funcName,
+            'line': record.lineno,
+        }
+        
+        if hasattr(request, 'url'):
+            log_record.update({
+                'url': request.url,
+                'method': request.method,
+                'remote_addr': request.remote_addr,
+            })
+        
+        return json.dumps(log_record)
+```
+
+app/wsgi.py:
+```
+from app import create_app
+
+app = create_app()
+
+if __name__ == '__main__':
+    app.run()
+```
+
+app/models/__init__.py:
+```
+from app.extensions import db
+from .user import User
+from .role import Role
+
+__all__ = ['User', 'Role', 'db']
+```
+
+app/models/role.py:
+```
+from app.extensions import db
+
+class Role(db.Model):
+    __tablename__ = 'roles'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(50), unique=True, nullable=False)
+    description = db.Column(db.String(200))
+    
+    users = db.relationship('User', backref='role', lazy=True)
+    
+    def __repr__(self):
+        return f'<Role {self.name}>'
+```
+
+app/models/user.py:
+```
+from app.extensions import db
+from werkzeug.security import generate_password_hash, check_password_hash
+
+class User(db.Model):
+    __tablename__ = 'users'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password_hash = db.Column(db.String(256))
+    role_id = db.Column(db.Integer, db.ForeignKey('roles.id'), nullable=False)
+    
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password, method='pbkdf2:sha256')
+    
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+    
+    @property
+    def is_admin(self):
+        return self.role.name == 'admin'
+    
+    def __repr__(self):
+        return f'<User {self.username}>'
+```
+
+app/schemas/__init__.py:
+```
+from .user import UserSchema, UserCreateSchema, UserLoginSchema
+
+__all__ = ['UserSchema', 'UserCreateSchema', 'UserLoginSchema']
+```
+
+app/schemas/user.py:
+```
+from marshmallow import Schema, fields, validate
+
+class UserSchema(Schema):
+    id = fields.Int(dump_only=True)
+    username = fields.Str(required=True, validate=validate.Length(min=3, max=80))
+    email = fields.Email(required=True)
+    is_admin = fields.Bool(dump_only=True)
+
+class UserCreateSchema(UserSchema):
+    password = fields.Str(required=True, validate=validate.Length(min=8), load_only=True)
+
+class UserLoginSchema(Schema):
+    username = fields.Str(required=True)
+    password = fields.Str(required=True)
+```
+
+app/services/__init__.py:
+```
+from .auth import create_admin_user, authenticate_user
+
+__all__ = ['create_admin_user', 'authenticate_user']
+```
+
+app/services/auth.py:
+```
+from app.models import User, Role
+from app.extensions import db
+from app.config import Config
+
+def create_admin_user():
+    admin_role = Role.query.filter_by(name='admin').first()
+    if not admin_role:
+        admin_role = Role(name='admin', description='Administrator')
+        db.session.add(admin_role)
+        db.session.commit()
+
+    admin_user = User.query.filter_by(username=Config.FLASK_ADMIN_USER).first()
+    if not admin_user:
+        admin_user = User(
+            username=Config.FLASK_ADMIN_USER,
+            email='admin@example.com',
+            role_id=admin_role.id
+        )
+        admin_user.set_password(Config.FLASK_ADMIN_PASSWORD)
+        db.session.add(admin_user)
+        db.session.commit()
+
+def authenticate_user(username, password):
+    user = User.query.filter_by(username=username).first()
+    if user and user.check_password(password):
+        return user
+    return None
+```
+
+app/utils/__init__.py:
+```
+from .decorators import admin_required
+
+__all__ = ['admin_required']
+```
+
+app/utils/decorators.py:
+```
+from functools import wraps
+from flask_jwt_extended import verify_jwt_in_request, get_jwt
+from flask import jsonify
+from app.extensions import db
+
+def admin_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        verify_jwt_in_request()
+        claims = get_jwt()
+        
+        if not claims.get('is_admin', False):
+            return jsonify({'message': 'Admins only!'}), 403
+        return fn(*args, **kwargs)
+    return wrapper
+```
+
+app/views/admin.py:
+```
+from flask import Blueprint, render_template
+from flask_login import login_required
+from app.utils.decorators import admin_required
+
+admin_bp = Blueprint('admin', __name__)
+
+@admin_bp.route('/')
+@login_required
+@admin_required
+def admin_dashboard():
+    return render_template('admin/index.html')
+```
+
+app/views/api.py:
+```
+from flask import Blueprint, jsonify, request
+from flask_jwt_extended import jwt_required, get_jwt_identity, create_access_token
+from app.models import db, User, Role
+from app.schemas import UserSchema, UserCreateSchema, UserLoginSchema
+from app.utils.decorators import admin_required
+
+api_bp = Blueprint('api', __name__)
+
+user_schema = UserSchema()
+users_schema = UserSchema(many=True)
+user_create_schema = UserCreateSchema()
+user_login_schema = UserLoginSchema()
+
+@api_bp.route('/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    errors = user_login_schema.validate(data)
+    if errors:
+        return jsonify({'errors': errors}), 400
+        
+    user = User.query.filter_by(username=data['username']).first()
+    if not user or not user.check_password(data['password']):
+        return jsonify({'message': 'Invalid credentials'}), 401
+        
+    access_token = create_access_token(
+        identity=user.username,
+        additional_claims={'is_admin': user.is_admin}
+    )
+    return jsonify({'access_token': access_token}), 200
+
+@api_bp.route('/users', methods=['GET'])
+@jwt_required()
+def get_users():
+    users = User.query.all()
+    return jsonify(users_schema.dump(users)), 200
+
+@api_bp.route('/users', methods=['POST'])
+@admin_required
+def create_user():
+    data = request.get_json()
+    errors = user_create_schema.validate(data)
+    if errors:
+        return jsonify({'errors': errors}), 400
+        
+    if User.query.filter_by(username=data['username']).first():
+        return jsonify({'message': 'Username already exists'}), 400
+        
+    user_role = Role.query.filter_by(name='user').first()
+    new_user = User(
+        username=data['username'],
+        email=data['email'],
+        role_id=user_role.id
+    )
+    new_user.set_password(data['password'])
+    db.session.add(new_user)
+    db.session.commit()
+    
+    return jsonify(user_schema.dump(new_user)), 201
+```
